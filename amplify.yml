@@ -1,0 +1,19 @@
+version: 1
+applications:
+  - appRoot: client
+    frontend:
+      buildPath: /
+      phases:
+        preBuild:
+          commands:
+            - npm ci
+        build:
+          commands:
+            - npm run build --workspace=@quizblitz/client
+      artifacts:
+        baseDirectory: client/dist
+        files:
+          - '**/*'
+      cache:
+        paths:
+          - node_modules/**/*

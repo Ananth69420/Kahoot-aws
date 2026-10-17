@@ -1,76 +1,88 @@
-# QuizBlitz AWS Deployment: One EC2 Instance
+# Deploy QuizBlitz on AWS with Two EC2 Instances
 
-This guide deploys the complete QuizBlitz app on **one Ubuntu EC2 instance**. It intentionally does not use Amplify or CloudFront: with no domain, keeping the website and API on the same EC2 host avoids the separate HTTPS API setup those services would require.
+This guide deploys QuizBlitz in the same **frontend instance + backend instance** pattern used in your class. Both instances are in the same AWS VPC and communicate over private IP addresses.
 
-- Nginx serves the built React website.
-- Nginx sends `/api/` and `/socket.io/` requests to the Node.js server.
-- Node.js runs the REST API and live games through Socket.IO.
-- PostgreSQL stores users, quizzes, and game history on the same instance.
-
-You will open the app at the instance's public IPv4 address, for example `http://203.0.113.25`. This is the simplest setup for a short classroom evaluation and does not require Amplify, CloudFront, a domain, or Certbot. It uses HTTP, so use demo credentials and do not use this setup for real users or sensitive data.
-
-Read the steps in order. Commands marked **On your computer** run in Windows PowerShell. Commands marked **On EC2** run in the EC2 terminal. Do not paste example values with angle brackets; replace each placeholder with your actual value.
-
-## Before you begin
-
-You need:
-
-- An AWS account and this QuizBlitz project on your Windows computer.
-- Git installed locally, and the project changes committed to a Git repository.
-- An EC2 SSH key pair downloaded as a `.pem` file. AWS will not let you download that private key again later.
-- The public repository URL, or the owner/name of your private GitHub repository.
-
-For a small evaluation, use Ubuntu Server 24.04 LTS on an instance with at least 2 GiB of memory (for example, `t3.small` where available) and a 20 GiB `gp3` root disk. EC2, storage, and public IPv4 addresses can incur charges. Review the current estimate shown by AWS before launching.
-
-## Part 1: Create the EC2 instance
-
-1. In AWS Console, choose the Region you will use, then open **EC2 → Instances → Launch instances**.
-2. Set **Name** to `quizblitz`.
-3. For **Application and OS Images**, choose **Ubuntu Server 24.04 LTS**, 64-bit x86.
-4. Choose an instance type with at least 2 GiB of memory.
-5. Under **Key pair (login)**, create a new key pair, choose `.pem`, download it, and remember where you saved it. Choose an existing key only if you still have its `.pem` file.
-6. Under **Network settings**, create a security group with these inbound rules:
-
-   | Type | Port | Source |
-   | --- | ---: | --- |
-   | SSH | 22 | My IP |
-   | HTTP | 80 | Anywhere IPv4 (`0.0.0.0/0`) |
-
-   Do not add inbound rules for 4000, 5432, or 443. The browser connects to Nginx on port 80; Nginx and PostgreSQL communicate locally inside the instance.
-
-7. Set storage to at least 20 GiB `gp3`.
-8. Launch one instance. Wait until its state is **Running** and both status checks pass.
-9. On the instance details page, copy its **Public IPv4 address**. You will use it in the SSH and browser commands below. The address can change after stopping and starting the instance. An Elastic IP can keep it stable, but is optional and may have a charge.
-
-## Part 2: Connect to Ubuntu
-
-On your computer, open PowerShell and replace the key path and address:
-
-```powershell
-ssh -i "$env:USERPROFILE\Downloads\quizblitz-key.pem" ubuntu@YOUR_EC2_PUBLIC_IP
+```text
+Your browser
+    │ HTTP :80
+    ▼
+Frontend EC2 (Nginx + built React website)
+    │ private VPC traffic to BACKEND_PRIVATE_IP:4000
+    ▼
+Backend EC2 (Node.js API + Socket.IO + PostgreSQL)
 ```
 
-For example, if the public IP is `203.0.113.25`, use `ubuntu@203.0.113.25`. The first time, SSH may ask whether to trust the host; type `yes`. If it says the key file cannot be read, check that the path points to the `.pem` you downloaded.
+Nginx on the frontend instance serves the site and forwards `/api/` and `/socket.io/` to Node.js on the backend's private IP. The browser only connects to the frontend. The backend's port `4000` is reachable only from the frontend security group, and PostgreSQL's port `5432` is never public.
 
-## Part 3: Install PostgreSQL, Nginx, Git, and Node.js
+This guide uses Ubuntu 24.04 and Nginx. Your lab used Amazon Linux, Apache, and port `8000`; QuizBlitz uses React, Node.js, Socket.IO, and PostgreSQL, so those lab scripts and port numbers do not apply directly.
 
-Run these commands in the EC2 terminal:
+This is an HTTP classroom demo. Both instances running costs more than one instance. Stop both when you are not using them to stop EC2 compute charges; EBS storage charges continue. Browsers configured to upgrade all HTTP links to HTTPS will still need that setting disabled, because this setup does not create TLS certificates.
+
+## What you need
+
+- This project committed to Git on your Windows computer.
+- An AWS account and a Region to use for both EC2 instances.
+- One EC2 key pair downloaded as a `.pem` file. You can use the same key pair for both instances.
+- A way to connect by SSH from your computer. The instructions use Windows PowerShell.
+
+Do not commit or upload `.env` files, database passwords, JWT secrets, or your `.pem` key.
+
+## Part 1: Create the two security groups
+
+In AWS Console, open **EC2 → Security Groups → Create security group**. Use the default VPC for the Region and create these groups.
+
+### Frontend security group: `quizblitz-frontend-sg`
+
+Add these inbound rules:
+
+| Type | Port | Source |
+| --- | ---: | --- |
+| HTTP | 80 | Anywhere IPv4 (`0.0.0.0/0`) |
+| SSH | 22 | My IP |
+
+### Backend security group: `quizblitz-backend-sg`
+
+Add these inbound rules:
+
+| Type | Port | Source |
+| --- | ---: | --- |
+| Custom TCP | 4000 | `quizblitz-frontend-sg` |
+| SSH | 22 | My IP |
+
+For the port `4000` source, select the frontend security group as the source (AWS may display its `sg-...` ID). Both groups must be in the same VPC. The backend API is not open to all internet addresses. Do not add public inbound rules for `4000` or `5432`. Leave the default outbound rules in place so the instances can install packages.
+
+## Part 2: Launch the backend EC2 instance
+
+1. Open **EC2 → Instances → Launch instances**.
+2. Set the name to `quizblitz-backend`.
+3. Select **Ubuntu Server 24.04 LTS**, 64-bit x86.
+4. Select an instance type with at least 2 GiB of memory. PostgreSQL and Node.js share this instance.
+5. Select the key pair you created. Enable **Auto-assign public IP** so you can SSH to it. The API itself will not be publicly reachable through that IP.
+6. Choose the same VPC and a subnet in that VPC. Under the firewall/security group option, select **quizblitz-backend-sg**.
+7. Use at least a 20 GiB `gp3` root volume.
+8. Launch the instance and wait for **Running** and both status checks to pass.
+9. Copy both the instance's **Public IPv4 address** (for SSH) and **Private IPv4 address** (for the frontend-to-backend connection). Keep these values labeled; they have different uses.
+
+## Part 3: Prepare the backend instance
+
+From Windows PowerShell, connect to the backend. Replace the key path and public IP:
+
+```powershell
+ssh -i "$env:USERPROFILE\Downloads\quizblitz-key.pem" ubuntu@BACKEND_PUBLIC_IP
+```
+
+Run on the backend EC2 terminal:
 
 ```bash
 sudo apt update
 sudo apt upgrade -y
-sudo apt install -y postgresql nginx git curl build-essential
-sudo systemctl enable --now postgresql nginx
-```
-
-Create a separate Linux account for the app and its directory:
-
-```bash
+sudo apt install -y postgresql git curl build-essential
+sudo systemctl enable --now postgresql
 sudo adduser --disabled-password --gecos "" quizblitz
 sudo install -d -o quizblitz -g quizblitz /var/www/quizblitz
 ```
 
-Install Node.js 22 and PM2 for the `quizblitz` account:
+Install Node.js 24 and PM2 for the `quizblitz` Linux account:
 
 ```bash
 sudo -iu quizblitz
@@ -79,69 +91,105 @@ source ~/.bashrc
 nvm install 24
 nvm alias default 24
 npm install --global pm2
-node --version
-npm --version
 exit
 ```
 
-The prompt should return to `ubuntu@...` after `exit`.
+## Part 4: Launch the frontend EC2 instance
 
-## Part 4: Copy the project onto EC2
+1. Choose **EC2 → Instances → Launch instances**.
+2. Set the name to `quizblitz-frontend`.
+3. Select **Ubuntu Server 24.04 LTS**, 64-bit x86.
+4. A small instance is enough to serve static frontend files; at least 1 GiB of memory is suitable for this demo.
+5. Select the same key pair as the backend. Enable **Auto-assign public IP**.
+6. Choose the same VPC as the backend. Under firewall/security group, select **quizblitz-frontend-sg**.
+7. Use at least a 12 GiB `gp3` root volume.
+8. Launch and wait for **Running** and both status checks to pass.
+9. Copy the frontend's **Public IPv4 address**. This is the website URL and the origin value the backend will allow. The proxy target is the backend instance's private IP from Part 2.
 
-Choose **A** if EC2 can clone your GitHub repository. Choose **B** to send the committed project from your computer with SCP.
+## Part 5: Copy the committed project to both instances
 
-### A. Clone from GitHub
+This uses a Git archive so it sends only files committed to Git. It does not include ignored `.env` files or local `node_modules`.
 
-For a public repository, run on EC2:
+### Create the archive on your computer
 
-```bash
-sudo -iu quizblitz
-git clone https://github.com/OWNER/REPOSITORY.git /var/www/quizblitz
-exit
-```
-
-Replace `OWNER/REPOSITORY` with the values from the repository's GitHub page. For a private repository, configure a read-only GitHub deploy key before running `git clone` (GitHub repository **Settings → Deploy keys**); do not paste a password or personal access token into the command line.
-
-### B. Upload the committed project with SCP
-
-This method sends only files tracked by Git, so ignored local `.env` files and `node_modules` are not uploaded. First, on your computer, open PowerShell in the project root (`D:\kahoot-aws`) and create a zip of the current commit:
+On your computer, open PowerShell in the project root, for example `D:\kahoot-aws`:
 
 ```powershell
 git status
 git archive --format=zip --output quizblitz.zip HEAD
 ```
 
-If `git status` shows changes you need, commit them before making the archive. Then copy the zip to EC2:
+If `git status` shows project changes you need, commit them first, then create the archive again.
+
+### Upload the archive to the backend
 
 ```powershell
-scp -i "$env:USERPROFILE\Downloads\quizblitz-key.pem" .\quizblitz.zip ubuntu@YOUR_EC2_PUBLIC_IP:/home/ubuntu/quizblitz.zip
+scp -i "$env:USERPROFILE\Downloads\quizblitz-key.pem" .\quizblitz.zip ubuntu@BACKEND_PUBLIC_IP:/home/ubuntu/quizblitz.zip
 ```
 
-Back in the EC2 terminal, unpack it and set the app account as owner:
+In the backend SSH session, unpack it and install dependencies:
 
 ```bash
 sudo apt install -y unzip
 sudo unzip -q /home/ubuntu/quizblitz.zip -d /var/www/quizblitz
 sudo chown -R quizblitz:quizblitz /var/www/quizblitz
+sudo -iu quizblitz
+cd /var/www/quizblitz
+npm ci
+exit
 ```
 
-Do not upload `.env` files or the `.pem` SSH key into the project directory or Git repository.
+### Upload the same archive to the frontend
 
-## Part 5: Create the database
+Open a second PowerShell window, or exit the backend SSH session first:
 
-On EC2, create a strong database password from random hexadecimal characters:
+```powershell
+scp -i "$env:USERPROFILE\Downloads\quizblitz-key.pem" .\quizblitz.zip ubuntu@FRONTEND_PUBLIC_IP:/home/ubuntu/quizblitz.zip
+```
+
+Connect to the frontend:
+
+```powershell
+ssh -i "$env:USERPROFILE\Downloads\quizblitz-key.pem" ubuntu@FRONTEND_PUBLIC_IP
+```
+
+On the frontend EC2 terminal, install Nginx and Node.js, then unpack and build:
+
+```bash
+sudo apt update
+sudo apt install -y nginx curl build-essential unzip
+sudo systemctl enable --now nginx
+sudo adduser --disabled-password --gecos "" quizblitz
+sudo install -d -o quizblitz -g quizblitz /var/www/quizblitz
+sudo unzip -q /home/ubuntu/quizblitz.zip -d /var/www/quizblitz
+sudo chown -R quizblitz:quizblitz /var/www/quizblitz
+sudo -iu quizblitz
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.8/install.sh | bash
+source ~/.bashrc
+nvm install 24
+cd /var/www/quizblitz
+npm ci
+npm --workspace client run build
+exit
+```
+
+Do not set `VITE_API_URL` for this setup. The browser calls the frontend's own `/api/` and `/socket.io/` paths; frontend Nginx forwards those paths to the backend over the VPC private IP.
+
+## Part 6: Create the PostgreSQL database on the backend
+
+Connect to the backend if you are not already connected. Generate a database password:
 
 ```bash
 openssl rand -hex 24
 ```
 
-Copy the output temporarily. Open PostgreSQL's administrator prompt:
+Copy the generated value temporarily. Open the PostgreSQL administrator prompt:
 
 ```bash
 sudo -u postgres psql
 ```
 
-At the `postgres=#` prompt, replace `PASTE_DATABASE_PASSWORD` with the generated value:
+At the `postgres=#` prompt, replace `PASTE_DATABASE_PASSWORD` with that generated value:
 
 ```sql
 CREATE ROLE quizblitz LOGIN PASSWORD 'PASTE_DATABASE_PASSWORD';
@@ -149,32 +197,27 @@ CREATE DATABASE quizblitz OWNER quizblitz;
 \q
 ```
 
-The `\q` exits PostgreSQL. Keep the password private. PostgreSQL will remain local; do not expose port 5432 in the EC2 security group.
+Do not configure PostgreSQL to listen on a public address. Its connection stays on the backend instance at `127.0.0.1:5432`.
 
-## Part 6: Configure the API
+## Part 7: Configure and start the backend API
 
-Create the production environment file as the app account:
+On the backend EC2 terminal, create the app environment file:
 
 ```bash
 sudo -iu quizblitz
 cd /var/www/quizblitz
 cp server/.env.example server/.env
 openssl rand -base64 48
-```
-
-Copy the random output for the JWT secret. Edit the environment file:
-
-```bash
 nano server/.env
 ```
 
-Set the file to these values, replacing both password placeholders. For `CLIENT_ORIGIN`, use the public IP from EC2 and keep the `http://` prefix:
+Copy the random output for `JWT_SECRET`. In `nano`, set these values. Use the **frontend public IP** for `CLIENT_ORIGIN`, and the database password you created above:
 
 ```env
 NODE_ENV=production
 PORT=4000
-HOST=127.0.0.1
-CLIENT_ORIGIN=http://YOUR_EC2_PUBLIC_IP
+HOST=0.0.0.0
+CLIENT_ORIGIN=http://FRONTEND_PUBLIC_IP
 DATABASE_URL=postgres://quizblitz:PASTE_DATABASE_PASSWORD@127.0.0.1:5432/quizblitz
 DATABASE_SSL=false
 TRUST_PROXY=true
@@ -183,7 +226,9 @@ JWT_EXPIRES_IN=7d
 BCRYPT_ROUNDS=12
 ```
 
-In `nano`, save with **Ctrl+O**, press **Enter**, then exit with **Ctrl+X**. Make the file readable only by the app account, install dependencies, and run the database migrations:
+Save with **Ctrl+O**, press **Enter**, then exit with **Ctrl+X**. `HOST=0.0.0.0` lets the frontend instance reach Node over the VPC network; the backend security group limits port `4000` to the frontend security group.
+
+Install dependencies and migrate the database:
 
 ```bash
 chmod 600 server/.env
@@ -191,39 +236,22 @@ npm ci
 npm --workspace server run db:migrate
 ```
 
-If the migration reports an error, stop here and check the database password and `DATABASE_URL` before starting the app.
-
-## Part 7: Build the website
-
-Still in `/var/www/quizblitz` as `quizblitz`, build the React site:
+Start the API as one PM2 process:
 
 ```bash
-npm --workspace client run build
-exit
-```
-
-The website is now in `/var/www/quizblitz/client/dist`. Do not set `VITE_API_URL` for this deployment: the browser will use the same public address for the website, API, and live-game connection.
-
-## Part 8: Start the API with PM2
-
-On EC2, switch to the app account and start the API with the included one-process configuration:
-
-```bash
-sudo -iu quizblitz
-cd /var/www/quizblitz
 pm2 startOrReload deploy/ecosystem.config.cjs --env production --update-env
 pm2 status
 pm2 save
 pm2 startup
 ```
 
-`pm2 startup` prints a command beginning with `sudo env PATH=...`. Select and copy the **entire command PM2 printed**. Then return to the Ubuntu account and run it:
+PM2 prints a full `sudo env PATH=...` startup command. Copy it, then return to the Ubuntu account and run it:
 
 ```bash
 exit
 ```
 
-Paste the copied command at the `ubuntu@...` prompt. It may ask for the Ubuntu sudo password; on an EC2 Ubuntu instance, sudo normally works without one. After the command succeeds, save the process list again as the app account:
+Paste the full command PM2 printed. When it succeeds, enable PM2 to restore the saved process list after reboot:
 
 ```bash
 sudo -iu quizblitz
@@ -231,131 +259,132 @@ pm2 save
 exit
 ```
 
-Keep the PM2 configuration at one process. The live game rooms and timers are held in memory, so multiple workers would not share the same game state.
+Keep one Node process because active game rooms and timers are stored in memory.
 
-## Part 9: Configure Nginx to serve the whole app
+Test the API locally on the backend:
 
-The included Nginx file serves the frontend, routes `/api/` to the Node API, and forwards WebSocket connections at `/socket.io/`:
+```bash
+curl --fail http://127.0.0.1:4000/api/health
+```
+
+It should return `{"status":"ok"}`.
+
+## Part 8: Connect frontend Nginx to the backend private IP
+
+On the frontend EC2 terminal, open the included Nginx file:
 
 ```bash
 cd /var/www/quizblitz
-sudo cp deploy/backend.nginx.conf /etc/nginx/sites-available/quizblitz
-sudo ln -s /etc/nginx/sites-available/quizblitz /etc/nginx/sites-enabled/quizblitz
+nano deploy/frontend.nginx.conf
+```
+
+In **both** places that say `BACKEND_PRIVATE_IP`, replace the placeholder with the backend instance's **Private IPv4 address** from EC2. Do not put the backend public IP here. Save with **Ctrl+O**, Enter, **Ctrl+X**.
+
+Install and enable the Nginx configuration:
+
+```bash
+sudo cp deploy/frontend.nginx.conf /etc/nginx/sites-available/quizblitz-frontend
+sudo ln -sfn /etc/nginx/sites-available/quizblitz-frontend /etc/nginx/sites-enabled/quizblitz-frontend
 sudo rm -f /etc/nginx/sites-enabled/default
 sudo nginx -t
-sudo systemctl enable --now nginx
 sudo systemctl reload nginx
 ```
 
-`nginx -t` should report that the syntax is okay and the test is successful. If `ln` says the file already exists, continue to `sudo nginx -t`; do not create a second link with a different name.
+`nginx -t` must report that the syntax is okay and the test is successful. Nginx serves the React files and proxies the API and WebSocket routes to `http://BACKEND_PRIVATE_IP:4000`.
 
-## Part 10: Open the site and check it
+Test from the frontend instance:
 
-On your computer, replace the placeholder with the EC2 public IPv4 address and open:
+```bash
+curl --fail http://BACKEND_PRIVATE_IP:4000/api/health
+curl --fail http://127.0.0.1/api/health
+```
+
+Replace `BACKEND_PRIVATE_IP` in the first command with the backend's private IP. Both commands should return `{"status":"ok"}`.
+
+## Part 9: Open and test QuizBlitz
+
+From your computer, open the frontend instance's **Public IPv4 address**:
 
 ```text
-http://YOUR_EC2_PUBLIC_IP/
+http://FRONTEND_PUBLIC_IP/
 ```
 
-Check the API health endpoint too:
+For example, if the frontend instance shows Public IPv4 address `3.107.128.1`, open `http://3.107.128.1/`. The API health check through the frontend proxy is:
 
 ```text
-http://YOUR_EC2_PUBLIC_IP/api/health
+http://FRONTEND_PUBLIC_IP/api/health
 ```
 
-It should display:
+It should show `{"status":"ok"}`. Then create an account, create a quiz with at least two questions, and join the live game from a second browser/device.
 
-```json
-{"status":"ok"}
+Browsers with **Always use secure connections**, **HTTPS-Only**, or an HTTPS-upgrade setting may change `http://` to `https://`. This deployment does not have TLS, so disable that browser option for the demo or the HTTPS request will fail. Do not change the backend port or open it publicly to solve this.
+
+## Update the IP configuration after stop/start
+
+Stopping preserves installed software, files, and the database on EBS. The backend's private IP normally stays the same across stop/start, but its automatically assigned public IP changes. The frontend's automatically assigned public IP also changes.
+
+After starting either instance, check its current IPs in the EC2 console:
+
+- If the **frontend public IP** changed, update the backend's `CLIENT_ORIGIN` to `http://NEW_FRONTEND_PUBLIC_IP`, then restart PM2 on the backend:
+
+  ```bash
+  sudo -iu quizblitz
+  nano /var/www/quizblitz/server/.env
+  pm2 restart quizblitz-api --update-env
+  pm2 save
+  exit
+  ```
+
+- If the **backend private IP** changed, update both `BACKEND_PRIVATE_IP` values in `/var/www/quizblitz/deploy/frontend.nginx.conf`, copy it again to `/etc/nginx/sites-available/quizblitz-frontend`, then run `sudo nginx -t && sudo systemctl reload nginx` on the frontend.
+- Open the site using the current **frontend public IP**.
+
+## Troubleshooting
+
+### Frontend page does not load
+
+Check that the frontend security group allows HTTP port `80` from `0.0.0.0/0`, then on the frontend instance run:
+
+```bash
+sudo nginx -t
+sudo systemctl status nginx
+ls -l /var/www/quizblitz/client/dist/index.html
+curl -i http://127.0.0.1/
 ```
 
-For a full check, create an account, create a quiz with at least two questions, then join its live game from a second browser or phone. The server terminal can show status and logs:
+### API health through the frontend returns 502
+
+Check that the backend is running and that Nginx uses the backend **private** IP:
 
 ```bash
 sudo -iu quizblitz
 pm2 status
 pm2 logs quizblitz-api --lines 100
 exit
-sudo systemctl status nginx postgresql
 ```
 
-## Updating the app later
-
-If you cloned from GitHub, commit and push the changes on your computer. Then on EC2:
+On the frontend, test the network path:
 
 ```bash
-sudo -iu quizblitz
-cd /var/www/quizblitz
-git pull
-npm ci
-npm --workspace server run db:migrate
-npm --workspace client run build
-pm2 restart quizblitz-api --update-env
-exit
+curl -i http://BACKEND_PRIVATE_IP:4000/api/health
 ```
 
-Then reload Nginx in the Ubuntu shell:
+Confirm the backend security group has Custom TCP `4000` with source `quizblitz-frontend-sg`, and the backend `.env` has `HOST=0.0.0.0`.
 
-```bash
-sudo systemctl reload nginx
-```
+### Signup or live Socket.IO connection fails
 
-If you used SCP, repeat **Part 4B** to upload a new committed zip, unpack it over the app directory, then repeat the install, migration, frontend build, and PM2 restart commands above. Do not replace `server/.env` when uploading updates.
+- Backend `CLIENT_ORIGIN` must exactly match the frontend **public** origin, including `http://` and without a trailing slash.
+- Restart PM2 after changing `.env`: `pm2 restart quizblitz-api --update-env`.
+- Confirm frontend Nginx has the `/socket.io/` proxy block and both its `proxy_pass` values use the backend private IP.
+- Confirm the browser is on the frontend URL over `http://`, not `https://`.
 
-## Troubleshooting
+### Browser reports the site cannot be reached but EC2 checks work
 
-### The browser cannot connect / times out
+Confirm you are opening the frontend's current public IPv4 address and that the browser hasn't upgraded the address to HTTPS. From PowerShell, `Test-NetConnection FRONTEND_PUBLIC_IP -Port 80` checks whether the public HTTP port is reachable.
 
-- Confirm the EC2 instance is **Running** and use its current **Public IPv4 address**.
-- Check the security group allows inbound HTTP port 80 from `0.0.0.0/0`.
-- Check Nginx: `sudo systemctl status nginx` and `sudo nginx -t`.
+## Separate AWS class practicals
 
-### The page loads but API health fails or shows 502
+S3 bucket versioning/static website hosting, IAM user policies, Lambda, API Gateway, SNS, SQS, and CodeBuild are separate classroom exercises. They are not required for this two-instance QuizBlitz deployment. QuizBlitz's API and live Socket.IO game server remain on the backend EC2 instance.
 
-- Check PM2 and logs by opening an app-account shell first:
+## Cleanup
 
-  ```bash
-  sudo -iu quizblitz
-  pm2 status
-  pm2 logs quizblitz-api --lines 100
-  exit
-  ```
-- Check the API locally: `curl http://127.0.0.1:4000/api/health`.
-- Check Nginx: `sudo nginx -t`.
-
-### PM2 says the app is not online
-
-Check `server/.env` exists, the database is running, and the database password is correct:
-
-```bash
-sudo systemctl status postgresql
-sudo -iu quizblitz
-pm2 logs quizblitz-api --lines 100
-exit
-```
-
-### Signup says the server is misconfigured
-
-The API requires a `CLIENT_ORIGIN`, `DATABASE_URL`, and a `JWT_SECRET` at least 32 characters long. Confirm the values in `/var/www/quizblitz/server/.env`, then restart PM2 with `--update-env`.
-
-### Nginx shows the default page or 404 on refresh
-
-Confirm `/var/www/quizblitz/client/dist/index.html` exists, the default Nginx site is disabled, and the Nginx configuration test succeeds:
-
-```bash
-ls -l /var/www/quizblitz/client/dist/index.html
-sudo nginx -t
-sudo systemctl reload nginx
-```
-
-### Live game does not connect
-
-Confirm the security group still keeps port 4000 closed, Nginx has the `/socket.io/` proxy block, and PM2 is online. The browser should use the same public IP and HTTP origin as the page.
-
-## AWS practicals not needed to run QuizBlitz
-
-The classroom S3 versioning/static website, Lambda/API Gateway, SNS, SQS, and CodeBuild exercises are separate practicals. They are not required by this one-instance QuizBlitz deployment. Do not create extra AWS resources for the app unless your instructor specifically requires those demonstrations.
-
-## Cleanup after the evaluation
-
-When you no longer need the demo, terminate the EC2 instance in **EC2 → Instances**. If you allocated an Elastic IP, release it in **EC2 → Elastic IPs** after the instance no longer needs it. Deleting the instance permanently removes the local PostgreSQL data unless you created a backup. Also delete any separate S3 buckets or other lab resources you created, and check the AWS Billing console for remaining resources.
+When finished, stop both instances to stop compute charges while preserving their EBS data. When you are sure you no longer need the app or its database, terminate both instances. If you created snapshots or other AWS resources for separate practicals, remove those separately. Check the AWS Billing console for any remaining resources.
